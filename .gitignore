@@ -1,0 +1,7 @@
+viv/*.jou
+viv/*.log
+viv/*.str
+viv/fpu.runs/
+viv/fpu.sim/
+viv/fpu.cache/
+viv/.Xil/**
