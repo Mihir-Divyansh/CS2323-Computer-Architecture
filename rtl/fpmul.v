@@ -56,11 +56,14 @@ module fpmul #(
     function [5:0] count_leading_zeros;
         input [MWIDTH:0] mantissa;
         integer i;
+        reg found;
         begin
-            count_leading_zeros = MWIDTH + 1;
+            found = 0;
+            count_leading_zeros = MWIDTH;
             for (i = MWIDTH; i >= 0; i = i - 1) begin
-                if (mantissa[i] == 1'b1) begin
+                if (mantissa[i] == 1'b1 && !found) begin
                     count_leading_zeros = MWIDTH - i;
+                    found = 1;
                 end
             end
         end
@@ -69,13 +72,17 @@ module fpmul #(
     function [5:0] priority_encode_product;
         input [2*(MWIDTH+1)-1:0] product;
         integer i;
+        reg found;
         begin
-            priority_encode_product = 0;
+            priority_encode_product = 1;
+            found = 0;
             for (i = 2*(MWIDTH+1)-2; i >= 2*(MWIDTH+1)-2-MWIDTH; i = i - 1) begin
-                if (product[i] == 1'b1) begin
+                if ((product[i] == 1'b1) && !found) begin
                     priority_encode_product = (2*(MWIDTH+1)-2) - i;
-                end else if (i == 2*(MWIDTH+1)-2-MWIDTH) begin
+                    found = 1;
+                end else if ((i == 2*(MWIDTH+1)-2-MWIDTH) && !found) begin
                     priority_encode_product = MWIDTH + 1;
+                    found = 1;
                 end
             end
         end
@@ -139,7 +146,7 @@ module fpmul #(
                     exp_result_s1 <= 0;
                 end else begin
                     if (issubnorm_a && issubnorm_b) begin
-                        exp_result_s1 <= 2 - BIAS - lz_count_a - lz_count_b;
+                        exp_result_s1 <= 0;
                     end else if (issubnorm_a) begin
                         exp_result_s1 <= expb_s0 + 1 - BIAS - lz_count_a;
                     end else if (issubnorm_b) begin
@@ -151,20 +158,45 @@ module fpmul #(
             end
         end
     end
-
     // Stage 2: Normalize and round
     reg sign_result_s2;
     reg [EWIDTH-1:0] exp_final_s2;
     reg [MWIDTH-1:0] man_final_s2;
     reg [2:0] fex_s2;
-    reg [5:0] lz_count;
-    reg [5:0] shift_amount;
-    reg [MWIDTH:0] rounded_man;
-    reg [MWIDTH:0] subnormal_man;
-    reg guard, round_bit, sticky;
-    reg [2*(MWIDTH+1)-1:0] product;
-    reg signed [EWIDTH+1:0] adjusted_exp;
-    reg [2:0] temp_fex;
+
+    wire [5:0] lz_count_product;
+    wire [2*(MWIDTH+1)-1:0] normalized_product;
+    wire signed [EWIDTH+1:0] normalized_exp;
+    wire [MWIDTH:0] mantissa_rounded;
+    wire [MWIDTH:0] subnormal_mantissa;
+    wire guard_bit, round_bit, sticky_bit;
+    wire should_round_up;
+
+    assign lz_count_product = priority_encode_product(man_product_s1);
+
+    wire product_overflow = man_product_s1[2*(MWIDTH+1)-1];
+    wire product_underflow = !man_product_s1[2*(MWIDTH+1)-1] && !man_product_s1[2*(MWIDTH+1)-2] && (man_product_s1 != 0);
+
+    // Calculate normalized product and exponent
+    assign normalized_product = product_overflow ? (man_product_s1 >> 1) :
+                            product_underflow ? (man_product_s1 << (lz_count_product > exp_result_s1 ? exp_result_s1[5:0] : lz_count_product)) :
+                            man_product_s1;
+
+    assign normalized_exp = product_overflow ? (exp_result_s1 + 1) :
+                        product_underflow ? (exp_result_s1 - (lz_count_product > exp_result_s1 ? exp_result_s1[5:0] : lz_count_product)) :
+                        exp_result_s1;
+
+    assign mantissa_rounded = normalized_product[2*(MWIDTH+1)-2 : 2*(MWIDTH+1)-2-MWIDTH];
+    assign guard_bit = normalized_product[2*(MWIDTH+1)-2-MWIDTH-1];
+    assign round_bit = normalized_product[2*(MWIDTH+1)-2-MWIDTH-2];
+    assign sticky_bit = |normalized_product[2*(MWIDTH+1)-2-MWIDTH-3:0];
+
+    // Round to Zero (truncate)
+    assign should_round_up = 0;
+
+    wire is_subnormal = (normalized_exp <= 0);
+    wire [5:0] subnormal_shift = is_subnormal ? (1 - normalized_exp) : 0;
+    assign subnormal_mantissa = mantissa_rounded >> subnormal_shift;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -180,93 +212,66 @@ module fpmul #(
             
             if (valid_s1) begin
                 if (special_case_s1) begin
+                    // Handle special cases
                     sign_result_s2 <= special_result[DWIDTH-1];
                     exp_final_s2 <= special_result[DWIDTH-2:MWIDTH];
                     man_final_s2 <= special_result[MWIDTH-1:0];
                     fex_s2 <= special_fex;
                 end else begin
                     sign_result_s2 <= sign_result_s1;
+                    fex_s2 <= 3'b000; 
                     
-                    product = man_product_s1;
-                    adjusted_exp = exp_result_s1;
-                    temp_fex = 3'b000;
-                    
-                    if (product[2*(MWIDTH+1)-1] == 1'b1) begin
-                        product = product >> 1;
-                        adjusted_exp = adjusted_exp + 1;
-                    end else if (product[2*(MWIDTH+1)-2] == 1'b0 && product != 0) begin
-                        lz_count = priority_encode_product(product);
-                        
-                        if (lz_count > adjusted_exp) begin
-                            shift_amount = adjusted_exp[5:0];
+                    // Check for overflow
+                    if (normalized_exp >= MAX_EXP) begin
+                        exp_final_s2 <= {EWIDTH{1'b1}};  
+                        man_final_s2 <= {MWIDTH{1'b0}}; 
+                        fex_s2 <= 3'b100; 
+                    end
+                    // Check for underflow to zero
+                    else if (normalized_exp < -(MWIDTH)) begin
+                        exp_final_s2 <= {EWIDTH{1'b0}};
+                        man_final_s2 <= {MWIDTH{1'b0}};
+                        fex_s2 <= 3'b010;  
+                    end
+                    // Subnormal result
+                    else if (is_subnormal) begin
+                        exp_final_s2 <= {EWIDTH{1'b0}};
+                        if (should_round_up && (subnormal_mantissa != {(MWIDTH+1){1'b1}})) begin
+                            man_final_s2 <= subnormal_mantissa[MWIDTH-1:0] + 1;
                         end else begin
-                            shift_amount = lz_count;
+                            man_final_s2 <= subnormal_mantissa[MWIDTH-1:0];
                         end
-                        
-                        if (shift_amount > 0) begin
-                            product = product << shift_amount;
-                            adjusted_exp = adjusted_exp - shift_amount;
-                        end
-                    end
-                    
-                    if (adjusted_exp >= MAX_EXP) begin
-                        exp_final_s2 <= MAX_EXP;
-                        man_final_s2 <= 0;
-                        temp_fex[2] = 1'b1;
-                        temp_fex[0] = 1'b1;
-                    end
-                    else if (adjusted_exp <= 0) begin
-                        exp_final_s2 <= 0;
-                        if (adjusted_exp < -(MWIDTH)) begin
-                            man_final_s2 <= 0;
-                            temp_fex[1] = 1'b1;
-                            temp_fex[0] = 1'b1;
-                        end else begin
-                            subnormal_man = product[2*(MWIDTH+1)-2 : 2*(MWIDTH+1)-2-MWIDTH];
-                            subnormal_man = subnormal_man >> (1 - adjusted_exp);
-                            man_final_s2 <= subnormal_man[MWIDTH-1:0];
-                            temp_fex[1] = 1'b1;
-                            if (product[2*(MWIDTH+1)-2-MWIDTH-1:0] != 0) begin
-                                temp_fex[0] = 1'b1;
-                            end
+                        fex_s2[1] <= 1'b1; 
+                        if (guard_bit || round_bit || sticky_bit) begin
+                            fex_s2[0] <= 1'b1; 
                         end
                     end
+                    // Normal result
                     else begin
-                        exp_final_s2 <= adjusted_exp[EWIDTH-1:0];
-                        
-                        rounded_man = product[2*(MWIDTH+1)-2 : 2*(MWIDTH+1)-2-MWIDTH];
-                        guard = product[2*(MWIDTH+1)-2-MWIDTH-1];
-                        round_bit = product[2*(MWIDTH+1)-2-MWIDTH-2];
-                        sticky = |product[2*(MWIDTH+1)-2-MWIDTH-3:0];
-                        
-                        if (guard && (round_bit || sticky || rounded_man[0])) begin
-                            rounded_man = rounded_man + 1;
-                            temp_fex[0] = 1'b1;
-                            
-                            if (rounded_man[MWIDTH] == 1'b1) begin
-                                rounded_man = rounded_man >> 1;
-                                adjusted_exp = adjusted_exp + 1;
-                                
-                                if (adjusted_exp >= MAX_EXP) begin
-                                    exp_final_s2 <= MAX_EXP;
-                                    man_final_s2 <= 0;
-                                    temp_fex[2] = 1'b1;
+                        if (should_round_up) begin
+                            if (mantissa_rounded == {(MWIDTH+1){1'b1}}) begin
+                                if ((normalized_exp + 1) >= MAX_EXP) begin
+                                    exp_final_s2 <= {EWIDTH{1'b1}};
+                                    man_final_s2 <= {MWIDTH{1'b0}};
+                                    fex_s2 <= 3'b100;
                                 end else begin
-                                    exp_final_s2 <= adjusted_exp[EWIDTH-1:0];
-                                    man_final_s2 <= rounded_man[MWIDTH-1:0];
+                                    exp_final_s2 <= normalized_exp[EWIDTH-1:0] + 1;
+                                    man_final_s2 <= {MWIDTH{1'b0}};
+                                    fex_s2 <= 3'b001;  // inexact
                                 end
                             end else begin
-                                man_final_s2 <= rounded_man[MWIDTH-1:0];
+                                exp_final_s2 <= normalized_exp[EWIDTH-1:0];
+                                man_final_s2 <= mantissa_rounded[MWIDTH-1:0] + 1;
+                                fex_s2 <= 3'b1;  // inexact
                             end
                         end else begin
-                            man_final_s2 <= rounded_man[MWIDTH-1:0];
-                            if (guard || round_bit || sticky) begin
-                                temp_fex[0] = 1'b1;
+                            exp_final_s2 <= normalized_exp[EWIDTH-1:0];
+                            man_final_s2 <= mantissa_rounded[MWIDTH-1:0];
+                            if (guard_bit || round_bit || sticky_bit) begin
+                                fex_s2 <= 3'b1;  // inexact
                             end
                         end
                     end
-                    
-                    fex_s2 <= temp_fex;
                 end
             end
         end

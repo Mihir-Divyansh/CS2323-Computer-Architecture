@@ -43,6 +43,8 @@ module fpmul_tb;
     reg [31:0] expected [0:9];
 
     initial begin
+        $dumpfile("fpmul.vcd");
+        $dumpvars(0, fpmul_tb);
         // Example normal numbers
         test_a[0] = 32'h3F800000; test_b[0] = 32'h40000000; expected[0] = 32'h40000000; // 1 * 2 = 2
         test_a[1] = 32'h40490FDB; test_b[1] = 32'h3F800000; expected[1] = 32'h40490FDB; // pi * 1 = pi
@@ -52,7 +54,7 @@ module fpmul_tb;
         test_a[5] = 32'h3EAAAAAB; test_b[5] = 32'h3F800000; expected[5] = 32'h3EAAAAAB; // 0.3333 * 1 = 0.3333
         test_a[6] = 32'h40400000; test_b[6] = 32'h40400000; expected[6] = 32'h41100000; // 3 * 3 = 9
         test_a[7] = 32'h40A00000; test_b[7] = 32'h3F800000; expected[7] = 32'h40A00000; // 5 * 1 = 5
-        test_a[8] = 32'h3FCCCCCD; test_b[8] = 32'h3F4CCCCD; expected[8] = 32'h3F9D70A4; // 1.6 * 0.8 ≈ 1.28
+        test_a[8] = 32'h3FCCCCCD; test_b[8] = 32'h3F4CCCCD; expected[8] = 32'h3fa3d70a; // 1.6 * 0.8 ≈ 1.28
         test_a[9] = 32'h40700000; test_b[9] = 32'h3F800000; expected[9] = 32'h40700000; // 3.75 * 1 = 3.75
     end
 
