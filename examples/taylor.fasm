@@ -1,0 +1,43 @@
+# taylor.fasm
+# e^x ≈ 1 + x + x^2/2! + x^3/3! + x^4/4! + x^5/5!
+
+
+# For now, tests with x = 1.0
+li.d f1, 1.0          
+
+# sum = 1.0 (term 0)
+li.d f0, 1.0
+
+# constants 1/n!
+li.d f10, 1.0
+li.d f11, 0.5
+li.d f12, 0.16666667
+li.d f13, 0.041666667
+li.d f14, 0.008333333
+
+# --- term 1: x ---
+# tmp = x * 1.0
+fmul.d f2, f1, f10
+fadd.d f3, f0, f2     # f3 = sum after term1
+
+# --- term 2: x^2 * (1/2) ---
+fmul.d f4, f1, f1     # f4 = x^2
+fmul.d f5, f4, f11    # f5 = x^2/2
+fadd.d f6, f3, f5     # f6 = sum after term2
+
+# --- term 3: x^3 * (1/6) ---
+fmul.d f7, f4, f1     # f7 = x^3
+fmul.d f8, f7, f12    # f8 = x^3/6
+fadd.d f9, f6, f8     # f9 = sum after term3
+
+# --- term 4: x^4 * (1/24) ---
+fmul.d f15, f7, f1    # f15 = x^4
+fmul.d f16, f15, f13  # f16 = x^4/24
+fadd.d f17, f9, f16   # f17 = sum after term4
+
+# --- term 5: x^5 * (1/120) ---
+fmul.d f18, f15, f1   # f18 = x^5
+fmul.d f19, f18, f14  # f19 = x^5/120
+fadd.d f20, f17, f19  # f20 = final sum
+
+# result is in f20
